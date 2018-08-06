@@ -1,0 +1,19 @@
+{
+  "name": "test",
+  "version": "1.0.0",
+  "scripts": {
+	"publish": "babel e6code.js >e5code.js",
+    "totem":  "babel input/totem.js -d /media/sf_vmshare/ducksrc",
+    "debe": "babel input/debe.js -d /media/sf_vmshare/ducksrc",
+    "enum": "babel input/enum.js -d /media/sf_vmshare/ducksrc",
+    "jsdb": "babel input/jsdb.js -d /media/sf_vmshare/ducksrc",
+    "atomic": "babel input/atomic.js -d /media/sf_vmshare/ducksrc",
+    "geohack": "babel input/geohack.js -d /media/sf_vmshare/ducksrc",
+    "test": "babel input/test.js -d /media/sf_vmshare/ducksrc"
+  },
+  "devDependencies": {
+    "babel-cli": "^6.0.0",
+    "babel-preset-es2015": "^6.24.1",
+    "babel-preset-latest": "^6.24.1"
+  }
+}
