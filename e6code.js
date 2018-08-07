@@ -1,239 +1,180 @@
-function xss(ctx,res) {
-		res([
-			{lat:33.902,lon:70.09,alt:22,t:10},
-			{lat:33.902,lon:70.09,alt:12,t:20}
-		]);
-	}e.Stats_Gain = assumed detector gain = area under trigger function
-		Stats.coherence_time = coherence time underlying the process
-		Dim = samples in profile = max coherence intervals
-		Flow.T = observation time
-		Events = query to get events
+function cints(ctx,res) {  
+	/* 
+	Return MLEs for random event process [ {x,y,...}, ...] given ctx parameters
 	*/
-		const { sqrt, floor, random, cos, sin, abs, PI, log, exp} = Math;
 		
-		function triggerProfile( solve, cb) {
-		/**
-		Use the Paley-Wiener Theorem to return the trigger function stats:
-
-			x = normalized time interval of recovered trigger
-			h = recovered trigger function at normalized times x
-			modH = Fourier modulous of recovered trigger at frequencies f
-			argH = Fourier argument of recovered trigger at frequencies f
-			f = spectral frequencies
-
-		via the callback cb(stats) given a solve request:
-
-			evs = events list
-			refLambda = ref mean arrival rate (for debugging)
-			alpha = assumed detector gain
-			N = profile sample times = max coherence intervals
-			model = correlation model name
-			Tc = coherence time of arrival process
+		function coherenceIntervals(solve, cb) { // unsupervised learning of coherence intervals M, SNR, etc
+		/*
+			H[k] = observation freqs at count level k
 			T = observation time
+			N = number of observations
+			solve = {use: "lma" | ...,  lma: [initial M], lfa: [initial M], bfs: [start, end, increment M] }
+			callback cb(unsupervised estimates)
 		*/
-			
-			var 
-				ctx = {
-					evs: ME.matrix( solve.evs ),
-					N: solve.N,
-					refLambda: solve.refLambda,
-					alpha: solve.alpha,
-					T: solve.T,
-					Tc: solve.Tc
-				},
-				script = `
-N0 = fix( (N+1)/2 );
-fs = (N-1)/T;
-df = fs/N;
-nu = rng(-fs/2, fs/2, N); 
-t = rng(-T/2, T/2, N); 
-V = evpsd(evs, nu, T, "n", "t");  
+			function logNB(k,a,x) { // negative binomial objective function
+			/*
+			return log{ p0 } where
+				p0(x) = negbin(a,k,x) = (gamma(k+x)/gamma(x))*(1+a/x)**(-x)*(1+x/a)**(-k) 
+				a = <k> = average count
+				x = script M = coherence intervals
+				k = count level
+			 */
+				var
+					ax1 =  1 + a/x,
+					xa1 = 1 + x/a,
 
-Lrate = V.rate / alpha;
-Accf = Lrate * ${solve.model}(t/Tc);
-Lccf = Accf[N0]^2 + abs(Accf).^2;
-Lpsd =  wkpsd( Lccf, T);
-disp({ 
-	evRates: {ref: refLambda, ev: V.rate, L0: Lpsd[N0]}, 
-	idx0lag: N0, 
-	obsTime: T, 
-	sqPower: {N0: N0, ccf: Lccf[N0], psd: sum(Lpsd)*df }
-});
+					// nonindexed log Gamma works with optimizers, but slower than indexed versions
+					logGx = GAMMA.log(x),
+					logGkx = GAMMA.log(k+x), 
+					logGk1 = GAMMA.log(k+1);
 
-Upsd = Lrate + Lpsd;
-modH = sqrt(V.psd ./ Upsd );  
+					// indexed log Gamma produce round-off errors in optimizers 
+					// logGx = logGamma[ floor(x) ],
+					// logGkx = logGamma[ floor(k + x) ],
+					// logGk1 = logGamma[ floor(k + 1) ];
 
-argH = pwt( modH, [] ); 
-h = re(dft( modH .* exp(i*argH),T)); 
-x = t/T; 
-`;
-			ME.exec(script,  ctx, function (ctx) {
-				//Log("vmctx", ctx);
-				cb({
-					trigger: {
-						x: ctx.x,
-						h: ctx.h,
-						modH: ctx.modH,
-						argH: ctx.argH,
-						f: nu
-					}
-				});
-			});
-		}
-		
-		var
-			stats = ctx.Stats,
-			file = ctx.File,
-			flow = ctx.Flow;
-		
-		if (stats.coherence_time)
-			FLOW.all(ctx, function (evs) {  // fetch all the events
-				if (evs)
-					triggerProfile({  // define solver parms
-						evs: evs,		// events
-						refLambda: stats.mean_intensity, // ref mean arrival rate (for debugging)
-						alpha: file.Stats_Gain, // assumed detector gain
-						N: ctx.Dim, 		// samples in profile = max coherence intervals
-						model: ctx.Model,  	// name correlation model
-						Tc: stats.coherence_time,  // coherence time of arrival process
-						T: flow.T  		// observation time
-					}, function (stats) {
-						ctx.Save = stats;
-						res(ctx);
-					});
-			});
-		
-		else
-			res(null);
-	}}],
-						function (err, pcs) {
-							if (!err) cb(pcs);
-					});
-				}
-
-				findpcs( function (pcs) {
-					if (pcs.length) 
-						sendpcs( pcs );
-
-					else
-					SQL.query(
-						"SELECT count(ID) as Count FROM app.pcs WHERE least(?,1)", {
-							max_intervals: Mmax, 
-							correlation_model: model
-						}, 
-						function (err, test) {  // see if pc model exists
-
-						//Log("test", test);
-						if ( !test[0].Count )  // pc model does not exist so make it
-							genpcs( Mmax, Mwin*2, model, function () {
-								findpcs( sendpcs );
-							});
-
-						else  // search was too restrictive so no need to remake model
-							sendpcs(pcs);
-					});							
-				});
+				return logGkx - logGk1 - logGx  - k*log(xa1) - x*log(ax1);
 			}
-	
-			getpcs( solve.model||"sinc", solve.min||0, solve.M, solve.Mstep/2, solve.Mmax, function (pcs) {
-				
-				const { sqrt, random, log, exp, cos, sin, PI } = Math;
-				
-				function expdev(mean) {
-					return -mean * log(random());
+
+			function LFA(init, f, logp) {  // linear-factor-analysis (via newton raphson) for chi^2 extrema - use at your own risk
+			/*
+			1-parameter (x) linear-factor analysis
+			k = possibly compressed list of count bins
+			init = initial parameter values [a0, x0, ...] of length N
+			logf  = possibly compressed list of log count frequencies
+			a = Kbar = average count
+			x = M = coherence intervals		
+			*/
+
+				function p1(k,a,x) { 
+				/*
+				return p0'(x) =
+							(1 + x/a)**(-k)*(a/x + 1)**(-x)*(a/(x*(a/x + 1)) - log(a/x + 1)) * gamma[k + x]/gamma[x] 
+								- (1 + x/a)**(-k)*(a/x + 1)**(-x)*gamma[k + x]*polygamma(0, x)/gamma[x] 
+								+ (1 + x/a)**(-k)*(a/x + 1)**(-x)*gamma[k + x]*polygamma(0, k + x)/gamma[x] 
+								- k*(1 + x/a)**(-k)*(a/x + 1)**(-x)*gamma[k + x]/( a*(1 + x/a)*gamma[x] )			
+
+						=	(1 + x/a)**(-k)*(a/x + 1)**(-x)*(a/(x*(a/x + 1)) - log(a/x + 1)) * G[k + x]/G[x] 
+								- (1 + x/a)**(-k)*(a/x + 1)**(-x)*PSI(x)*G[k + x]/G[x] 
+								+ (1 + x/a)**(-k)*(a/x + 1)**(-x)*PSI(k + x)*G[k + x]/G[x] 
+								- k*(1 + x/a)**(-k)*(a/x + 1)**(-x)*G[k + x]/G[x]/( a*(1 + x/a) )			
+
+						=	G[k + x]/G[x] * (1 + a/x)**(-x) * (1 + x/a)**(-k) * {
+								(a/(x*(a/x + 1)) - log(a/x + 1)) - PSI(x) + PSI(k + x) - k / ( a*(1 + x/a) ) }
+
+						= p(x) * { (a/x) / (1+a/x) - (k/a) / (1+x/a) - log(1+a/x) + Psi(k+x) - Psi(x)  }
+
+						= p(x) * { (a/x - k/a) / (1+x/a) - log(1+a/x) + Psi(k+x) - Psi(x)  }
+
+					where
+						Psi(x) = polyGamma(0,x)
+				 */
+					var
+						ax1 =  1 + a/x,
+						xa1 = 1 + x/a,
+
+						// indexed Psi may cause round-off problems in optimizer
+						psix = Psi[ floor(x) ], 
+						psikx = Psi[ floor(k + x) ], 
+
+						slope = (a/x - k/a)/ax1 - log(ax1) + psikx - psix;
+
+					return exp( logp(k,a,x) ) * slope;  // the slope may go negative so cant return logp1		
 				}
-				
-				if (pcs) {
+
+				function p2(k,a,x) {  // not used
+				/*
+				return p0" = 
+						(1 + x/a)**(-k)*(a/x + 1)**(-x)*( a**2/(x**3*(a/x + 1)**2) 
+							+ (a/(x*(a/x + 1)) - log(a/x + 1))**2 - 2*(a/(x*(a/x + 1)) - log(a/x + 1) )*polygamma(0, x) 
+						+ 2*(a/(x*(a/x + 1)) - log(a/x + 1))*polygamma(0, k + x) 
+						+ polygamma(0, x)**2 
+						- 2*polygamma(0, x)*polygamma(0, k + x) + polygamma(0, k + x)**2 - polygamma(1, x) + polygamma(1, k + x) 
+						- 2*k*(a/(x*(a/x + 1)) - log(a/x + 1))/(a*(1 + x/a)) + 2*k*polygamma(0, x)/(a*(1 + x/a)) 
+						- 2*k*polygamma(0, k + x)/(a*(1 + x/a)) + k**2/(a**2*(1 + x/a)**2) + k/(a**2*(1 + x/a)**2))*gamma(k + x)/gamma(x);
+				 */
+					var
+						ax1 =  1 + a/x,
+						xa1 = 1 + x/a,
+						xak = xa1**(-k),
+						axx = ax1**(-x),
+
+						// should make these unindexed log versions
+						gx = logGamma[ floor(x) ],
+						gkx = logGamma[ floor(k + x) ],
+
+						logax1 = log(ax1),
+						xax1 = x*ax1,
+						axa1 = a*xa1,				
+
+						// should make these Psi 
+						pg0x = polygamma(0, x),
+						pg0kx = polygamma(0, k + x);
+
+					return xak*axx*(a**2/(x**3*ax1**2) + (a/xax1 - logax1)**2 - 2*(a/xax1 - logax1)*pg0x 
+								+ 2*(a/xax1 - logax1)*pg0kx + pg0x**2 
+								- 2*pg0x*pg0kx + pg0kx**2 - polygamma(1, x) + polygamma(1, k + x) 
+								- 2*k*(a/xax1 - logax1)/axa1 + 2*k*pgx/axa1 - 2*k*pg0kx/axa1 
+								+ k**2/(a**2*xa1**2) + k/(a**2*xa1**2))*gkx/gx;
+				}
+
+				function chiSq1(f,a,x) { 
+				/*
+				return chiSq' (x)
+				*/
 					var 
-						pcRef = pcs.ref,  // [unitless]
-						pcVals = pcs.values,  // [unitless]
-						N = pcVals.length,
-						T = solve.T,
-						dt = T / (N-1),
-						egVals = $(N, (n,e) => e[n] = solve.lambdaBar * dt * pcVals[n] * pcRef ),  // [unitless]
-						egVecs = pcs.vectors,   // [sqrt Hz]
-						ctx = {
-							T: T,
-							N: N,
-							dt: dt,
-							
-							E: ME.matrix( egVals ),
-							
-							B: $(N, (n,B) => {
-								var
-									b = sqrt( expdev( egVals[n] ) ),  // [unitless]
-									arg = random() * PI;
+						sum = 0,
+						Kmax = f.length;
 
-								Log(n,arg,b, egVals[n], T, N, solve.lambdaBar );
-								B[n] = ME.complex( b * cos(arg), b * sin(arg) );  // [unitless]
-							}),
+					for (var k=1; k<Kmax; k++) sum += ( exp( logp0(a,k,x) ) - f[k] ) * p1(a,k,x);
 
-							V: egVecs   // [sqrt Hz]
-						},
-						script = `
-A=B*V; 
-lambda = abs(A).^2 / dt; 
-Wbar = {evd: sum(E), prof: sum(lambda)*dt};
-evRate = {evd: Wbar.evd/T, prof: Wbar.prof/T};
-x = rng(-1/2, 1/2, N); 
-`;
-
-//Log(ctx);
-
-					if (N) 
-						ME.exec( script , ctx, (ctx) => {
-							//Log("ctx", ctx);
-							cb({
-								intensity: {x: ctx.x, i: ctx.lambda},
-								//mean_count: ctx.Wbar,
-								//mean_intensity: ctx.evRate,
-								eigen_ref: pcRef
-							});
-							Log({
-								mean_count: ctx.Wbar,
-								mean_intensity: ctx.evRate,
-								eigen_ref: pcRef
-							});
-						});	
-
-					else
-						cb({
-							error: `coherence intervals ${stats.coherence_intervals} > max pc dim`
-						});
+					//Log("chiSq1",a,x,Kmax,sum);
+					return sum;
 				}
 
-				else
-					cb({
-						error: "no pcs matched"
-					});
-			});
-		}
+				function chiSq2(f,a,x) {
+				/*
+				return chiSq"(x)
+				*/
+					var
+						sum =0,
+						Kmax = f.length;
 
-		var
-			stats = ctx.Stats,
-			flow = ctx.Flow;
-		
-		Log("rats ctx", stats);
-		if (stats)
-			arrivalRates({  // parms for principle components (intensity profile) solver
-				trace: false,   // eigen debug
-				T: flow.T,  // observation interval  [1/Hz]
-				M: stats.coherence_intervals, // coherence intervals
-				lambdaBar: stats.mean_intensity, // event arrival rate [Hz]
-				Mstep: 1,  // coherence step size when pc created
-				Mmax: ctx.Dim || 150,  // max coherence intervals when pc created
-				model: ctx.Model,  // assumed correlation model for underlying CCGP
-				min: ctx.MinEigen	// min eigen value to use
-			}, function (stats) {
-				ctx.Save = stats;
-				Log("save", stats);
-				res(ctx);
-			});
-		
-		else
-			res(null);
-		
-	}
+					for (var k=1; k<Kmax; k++) sum += p1(a,k,x) ** 2;
+
+					//Log("chiSq2",a,x,Kmax,sum);
+					return 2*sum;
+				}
+
+				var
+					Mmax = 400,
+					Kmax = f.length + Mmax,
+					eps = $(Kmax, (k,A) => A[k] = 1e-3),
+					Zeta = $(Kmax, (k,Z) => 
+						Z[k] = k ? ZETA(k+1) : -0.57721566490153286060   // -Z[0] is euler-masheroni constant
+					), 
+					Psi1 = Zeta.sum(),
+					Psi = $(Kmax, (x,P) =>   // recurrence to build the diGamma Psi
+							P[x] = x ? P[x-1] + 1/x : Psi1 
+					);
+
+				return NRAP( (x) => chiSq1(f, Kbar, x), (x) => chiSq2(f, Kbar, x), init[0]);  // 1-parameter newton-raphson
+			}
+
+			function LMA(init, k, logf, logp) {  // levenberg-marquart algorithm for chi^2 extrema
+			/*
+			N-parameter (a,x,...) levenberg-marquadt algorithm where
+			k = possibly compressed list of count bins
+			init = initial parameter values [a0, x0, ...] of length N
+			logf  = possibly compressed list of log count frequencies
+			a = Kbar = average count
+			x = M = coherence intervals
+			*/
+
+				switch ( init.length ) {
+					case 1:
+						return LM({  // 1-parm (x) levenberg-marquadt
+							x: k,  
 							y: logf
 						}, function ([x]) {
 							//Log(Kbar, x);
